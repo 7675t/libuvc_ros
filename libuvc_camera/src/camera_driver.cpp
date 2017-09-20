@@ -35,6 +35,7 @@
 
 #include <ros/ros.h>
 #include <sensor_msgs/Image.h>
+#include <sensor_msgs/CompressedImage.h>
 #include <std_msgs/Header.h>
 #include <image_transport/camera_publisher.h>
 #include <dynamic_reconfigure/server.h>
@@ -52,8 +53,17 @@ CameraDriver::CameraDriver(ros::NodeHandle nh, ros::NodeHandle priv_nh)
     it_(nh_),
     config_server_(mutex_, priv_nh_),
     config_changed_(false),
-    cinfo_manager_(nh) {
-  cam_pub_ = it_.advertiseCamera("image_raw", 1, false);
+    cinfo_manager_(nh),
+    jpeg_only_mode_(false) {
+  
+  priv_nh_.getParam("jpeg_only_mode", jpeg_only_mode_);
+  ROS_INFO("jpeg_only_mode: %s", jpeg_only_mode_?"true":"false");
+  if (jpeg_only_mode_) {
+    jpeg_pub_ = nh_.advertise<sensor_msgs::CompressedImage>("image_raw/compressed", 1);
+    cinfo_pub_ = nh_.advertise<sensor_msgs::CameraInfo>("camera_info", 1);
+  } else {
+    cam_pub_ = it_.advertiseCamera("image_raw", 1, false);
+  }
 }
 
 CameraDriver::~CameraDriver() {
@@ -197,13 +207,15 @@ void CameraDriver::ImageCallback(uvc_frame_t *frame) {
   } else if (frame->frame_format == UVC_FRAME_FORMAT_MJPEG) {
     // Enable mjpeg support despite uvs_any2bgr shortcoming
     //  https://github.com/ros-drivers/libuvc_ros/commit/7508a09f
-    uvc_error_t conv_ret = uvc_mjpeg2rgb(frame, rgb_frame_);
-    if (conv_ret != UVC_SUCCESS) {
-      uvc_perror(conv_ret, "Couldn't convert frame to RGB");
-      return;
+    if (!jpeg_only_mode_) {
+      uvc_error_t conv_ret = uvc_mjpeg2rgb(frame, rgb_frame_);
+      if (conv_ret != UVC_SUCCESS) {
+        uvc_perror(conv_ret, "Couldn't convert frame to RGB");
+        return;
+      }
+      image->encoding = "rgb8";
+      memcpy(&(image->data[0]), rgb_frame_->data, rgb_frame_->data_bytes);
     }
-    image->encoding = "rgb8";
-    memcpy(&(image->data[0]), rgb_frame_->data, rgb_frame_->data_bytes);
 #endif
   } else {
     uvc_error_t conv_ret = uvc_any2bgr(frame, rgb_frame_);
@@ -224,7 +236,16 @@ void CameraDriver::ImageCallback(uvc_frame_t *frame) {
   cinfo->header.frame_id = config_.frame_id;
   cinfo->header.stamp = timestamp;
 
-  cam_pub_.publish(image, cinfo);
+  if (jpeg_only_mode_) {
+    sensor_msgs::CompressedImage::Ptr cimage(new sensor_msgs::CompressedImage());
+    cimage->format = "jpeg";
+    cimage->data.resize(frame->data_bytes);
+    memcpy(&(cimage->data[0]), frame->data, frame->data_bytes);
+    jpeg_pub_.publish(cimage);
+    cinfo_pub_.publish(cinfo);
+  } else {
+    cam_pub_.publish(image, cinfo);
+  }    
 
   if (config_changed_) {
     config_server_.updateConfig(config_);
