@@ -33,6 +33,7 @@
 *********************************************************************/
 #include "libuvc_camera/camera_driver.h"
 
+#include <unistd.h>
 #include <ros/ros.h>
 #include <sensor_msgs/Image.h>
 #include <std_msgs/Header.h>
@@ -169,6 +170,10 @@ void CameraDriver::ImageCallback(uvc_frame_t *frame) {
 
   boost::recursive_mutex::scoped_lock(mutex_);
 
+  if (state_ != kRunning || not rgb_frame_ )
+  {
+    return;
+  }
   assert(state_ == kRunning);
   assert(rgb_frame_);
 
@@ -197,6 +202,13 @@ void CameraDriver::ImageCallback(uvc_frame_t *frame) {
     image->step = image->width*2;
     image->data.resize(image->step * image->height);
     memcpy(&(image->data[0]), frame->data, frame->data_bytes);
+
+    // Ad-hoc: Change metric to mm
+    uint16_t* data = reinterpret_cast<uint16_t*>(&image->data[0]);
+    for (int i=0; i<image->height*image->width; i++)
+    {
+      data[i] = (uint16_t)(data[i]*0.406615*4.0);
+    }
   } else if (frame->frame_format == UVC_FRAME_FORMAT_YUYV) {
     // FIXME: uvc_any2bgr does not work on "yuyv" format, so use uvc_yuyv2bgr directly.
     uvc_error_t conv_ret = uvc_yuyv2bgr(frame, rgb_frame_);
@@ -451,6 +463,87 @@ void CameraDriver::OpenCamera(UVCCameraConfig &new_config) {
   rgb_frame_ = uvc_allocate_frame(new_config.width * new_config.height * 3);
   assert(rgb_frame_);
 
+  // Set range mode
+  if (true)
+  {
+    uint16_t send[5] = {0x0002, 0, 0, 0, 0};
+    uint16_t recv[5] = {0x8002, 0, 0, 0, 0};
+    int err;
+
+    err = uvc_set_ctrl(devh_, 3, 0x03, send, sizeof(send));
+    if (err != sizeof(send))
+    {
+      uvc_perror(uvc_error_t(err), "Set range failed.");
+    }
+    // Read
+    err = uvc_set_ctrl(devh_, 3, 0x03, recv, sizeof(recv));
+    if (err != sizeof(recv))
+    {
+      uvc_perror(uvc_error_t(err), "Set range2 failed.");
+    }
+    err = uvc_get_ctrl(devh_, 3, 0x03, recv, sizeof(recv), UVC_GET_CUR);
+    if (err != sizeof(recv))
+    {
+      uvc_perror(uvc_error_t(err), "Get range failed.");
+    }
+    else
+    {
+      uint16_t mode = recv[1];
+      ROS_INFO("range mode: %x", mode);
+    }
+  }
+  // Set NR filter
+  if (true)
+  {
+    uint16_t send[5] = {0x0004, 0, 0, 0, 0};
+    uint16_t recv[5] = {0x8004, 0, 0, 0, 0};
+    int err;
+
+    err = uvc_set_ctrl(devh_, 3, 0x03, send, sizeof(send));
+    if (err != sizeof(send))
+    {
+      uvc_perror(uvc_error_t(err), "Set NR filter failed.");
+    }
+    // Read
+    err = uvc_set_ctrl(devh_, 3, 0x03, recv, sizeof(recv));
+    if (err != sizeof(recv))
+    {
+      uvc_perror(uvc_error_t(err), "Set NR filter2 failed.");
+    }
+    err = uvc_get_ctrl(devh_, 3, 0x03, recv, sizeof(recv), UVC_GET_CUR);
+    if (err != sizeof(recv))
+    {
+      uvc_perror(uvc_error_t(err), "Get NR Filter failed.");
+    }
+    else
+    {
+      uint16_t data = recv[1];
+      ROS_INFO("NR Filter: %x", data);
+    }
+  }
+  if (true)
+  {
+    // Get range gain
+    uint16_t send[5] = {0x8007, 0, 0, 0, 0};
+    uint16_t recv[5] = {0x8007, 0, 0, 0, 0};
+    int err;
+
+    err = uvc_set_ctrl(devh_, 3, 0x03, send, sizeof(send));
+    if (err != sizeof(send))
+    {
+      uvc_perror(uvc_error_t(err), "Check send failed.");
+    }
+    err = uvc_get_ctrl(devh_, 3, 0x03, recv, sizeof(recv), UVC_GET_CUR);
+    if (err != sizeof(recv))
+    {
+      uvc_perror(uvc_error_t(err), "Check recv failed.");
+    }
+    else
+    {
+      double depth_rate = *(double*)(&recv[1]);
+      ROS_INFO("depth_rate: %f", depth_rate);
+    }
+  }
   state_ = kRunning;
 }
 
